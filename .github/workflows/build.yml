@@ -72,7 +72,15 @@ jobs:
 
       - name: Build with PyInstaller
         working-directory: src
-        run: pyinstaller --noconfirm packaging/lfeditor.spec
+        run: |
+          pyinstaller --noconfirm packaging/lfeditor.spec
+          pyinstaller --noconfirm packaging/lffirmware.spec
+
+      - name: Resolve loader version
+        id: fwver
+        shell: bash
+        working-directory: src
+        run: echo "version=$(python -c 'import lffirmware; print(lffirmware.__version__)')" >> "$GITHUB_OUTPUT"
 
       # ---- package + smoke-test the frozen bundle, per OS ----
       - name: Package + selftest (Linux)
@@ -82,7 +90,9 @@ jobs:
         run: |
           set -e
           ./dist/LFPlusEditor/LFPlusEditor --selftest
+          ./dist/LFFirmwareLoader/LFFirmwareLoader --selftest
           bash packaging/linux/make_appimage.sh "${{ steps.ver.outputs.version }}"
+          (cd dist && zip -qr "LFFirmwareLoader-${{ steps.fwver.outputs.version }}-linux-x64.zip" LFFirmwareLoader)
 
       - name: Package + selftest (macOS)
         if: runner.os == 'macOS'
@@ -91,9 +101,12 @@ jobs:
         run: |
           set -e
           ./dist/LFPlusEditor/LFPlusEditor --selftest
+          ./dist/LFFirmwareLoader/LFFirmwareLoader --selftest
           cd dist
           ditto -c -k --sequesterRsrc --keepParent \
             "LF+ Editor (native).app" "LFPlusEditor-${{ steps.ver.outputs.version }}-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "LF+ Firmware Loader.app" "LFFirmwareLoader-${{ steps.fwver.outputs.version }}-macos-arm64.zip"
 
       - name: Package + selftest (Windows)
         if: runner.os == 'Windows'
@@ -103,7 +116,11 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           $p = Start-Process -FilePath "dist/LFPlusEditor/LFPlusEditor.exe" -ArgumentList "--selftest" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Write-Error "selftest failed (exit $($p.ExitCode))"; exit 1 }
+          $q = Start-Process -FilePath "dist/LFFirmwareLoader/LFFirmwareLoader.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($q.ExitCode -ne 0) { Write-Error "loader selftest failed (exit $($q.ExitCode))"; exit 1 }
           Compress-Archive -Path "dist/LFPlusEditor" -DestinationPath "dist/LFPlusEditor-$v-windows-x64.zip" -Force
+          $fv = "${{ steps.fwver.outputs.version }}"
+          Compress-Archive -Path "dist/LFFirmwareLoader" -DestinationPath "dist/LFFirmwareLoader-$fv-windows-x64.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
