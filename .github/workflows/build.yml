@@ -1,0 +1,167 @@
+name: build
+
+# Builds the LF+ Editor standalone bundles for Windows, Linux and macOS from the SOURCE repo
+# (sungle-spec/famc-liquid-foot-usb-editor) at any branch or tag, and — when release_tag is
+# given — publishes them as a GitHub Release on THIS repo. PyInstaller can't cross-compile, so
+# each OS bundle is produced on its own native runner.
+#
+# Setup (once): add a fine-grained PAT with *contents: read* on the source repo as the
+# The source repo is public, so the checkout needs no token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source ref to build (branch, tag or SHA of famc-liquid-foot-usb-editor)"
+        default: "main"
+      release_tag:
+        description: "Publish a Release with this tag (e.g. v0.0.3). Leave empty for artifacts only."
+        default: ""
+
+env:
+  PYTHON_VERSION: "3.12"
+  SRC_REPO: sungle-spec/famc-liquid-foot-usb-editor
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4            # this repo: packaging/
+      - name: Check out the source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          path: src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Qt/runtime system libs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libasound2 \
+            libfontconfig1 libfreetype6 libxcb-cursor0
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/requirements-dev.txt pillow
+
+      # Overlay the packaging files onto the source tree so the spec's relative paths
+      # (lfeditor/, packaging/) work unchanged, then build from inside it.
+      - name: Overlay packaging onto the source tree
+        shell: bash
+        run: cp -R packaging src/packaging
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        working-directory: src
+        run: echo "version=$(python -c 'import lfeditor; print(lfeditor.__version__)')" >> "$GITHUB_OUTPUT"
+
+      - name: Generate app icons
+        working-directory: src
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python packaging/make_icons.py
+
+      - name: Build with PyInstaller
+        working-directory: src
+        run: pyinstaller --noconfirm packaging/lfeditor.spec
+
+      # ---- package + smoke-test the frozen bundle, per OS ----
+      - name: Package + selftest (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: src
+        run: |
+          set -e
+          ./dist/LFPlusEditor/LFPlusEditor --selftest
+          bash packaging/linux/make_appimage.sh "${{ steps.ver.outputs.version }}"
+
+      - name: Package + selftest (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: src
+        run: |
+          set -e
+          ./dist/LFPlusEditor/LFPlusEditor --selftest
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "LF+ Editor (native).app" "LFPlusEditor-${{ steps.ver.outputs.version }}-macos-arm64.zip"
+
+      - name: Package + selftest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $p = Start-Process -FilePath "dist/LFPlusEditor/LFPlusEditor.exe" -ArgumentList "--selftest" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Write-Error "selftest failed (exit $($p.ExitCode))"; exit 1 }
+          Compress-Archive -Path "dist/LFPlusEditor" -DestinationPath "dist/LFPlusEditor-$v-windows-x64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ runner.os }}-package
+          path: |
+            src/dist/*.zip
+            src/dist/*.AppImage
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the source repo (version check)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ inputs.ref }}
+          path: src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Verify release_tag matches __version__
+        shell: bash
+        working-directory: src
+        run: |
+          tag="${{ inputs.release_tag }}"; tag="${tag#v}"
+          ver="$(python -c 'import lfeditor; print(lfeditor.__version__)')"
+          echo "tag=$tag  __version__=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::release_tag v$tag does not match lfeditor.__version__ ($ver) at ref '${{ inputs.ref }}'"
+            exit 1
+          fi
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          sums="$GITHUB_WORKSPACE/SHA256SUMS.txt"
+          : > "$sums"
+          cd artifacts
+          find . -type f \( -name '*.zip' -o -name '*.AppImage' \) | sort | while read -r f; do
+            sha256sum "$f" | awk -v b="$(basename "$f")" '{print $1"  "b}' >> "$sums"
+          done
+          echo "----- SHA256SUMS.txt -----"
+          cat "$sums"
+      - name: Publish GitHub Release (on this repo)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          body: "Built from ${{ env.SRC_REPO }}@${{ inputs.ref }}."
+          files: |
+            artifacts/**/*
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true

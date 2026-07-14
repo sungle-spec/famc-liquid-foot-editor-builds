@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LF+ Editor (native)
+GenericName=MIDI Foot Controller Editor
+Comment=Editor for the FAMC Liquid Foot+ MIDI foot controller
+Exec=LFPlusEditor
+Icon=lfeditor
+Categories=AudioVideo;Audio;Utility;
+Terminal=false
