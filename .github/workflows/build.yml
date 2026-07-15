@@ -144,6 +144,7 @@ jobs:
           repository: ${{ env.SRC_REPO }}
           ref: ${{ inputs.ref }}
           path: src
+          fetch-depth: 0   # full history, needed to diff against the previous release below
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -173,11 +174,59 @@ jobs:
           done
           echo "----- SHA256SUMS.txt -----"
           cat "$sums"
+      # Auto-generated audit trail: a bullet list of commit subjects since the previous editor
+      # release, so every release documents what actually changed (not just a "built from main"
+      # placeholder). The previous release's exact source commit is recovered from a hidden
+      # marker this same step embeds in its own release body — see the marker line below — so
+      # this works with no separate state to maintain. Only commit SUBJECT lines are ever
+      # included; this repo's convention is that commit messages never reference specific user
+      # rig/preset data, so the generated notes are safe to publish as-is. Feel free to polish
+      # a release's notes by hand afterward (`gh release edit`) — this is a floor, not a ceiling.
+      - name: Generate changelog since the previous release
+        id: changelog
+        shell: bash
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cur_sha="$(git rev-parse HEAD)"
+          prev_tag=""
+          prev_sha=""
+          # Most recent EXISTING vX.Y.Z release on this repo (excludes the firmware-loader
+          # pre-release and the tag we're about to publish, since it doesn't exist yet).
+          # NOTE: sort by publishedAt, not createdAt — createdAt reflects the underlying git
+          # tag's commit date, which is NOT chronological release order (bit us once: it made
+          # every 0.0.x release since v0.0.4 look simultaneous, since they share tag history).
+          prev_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 \
+            --json tagName,publishedAt,isDraft \
+            --jq '[.[] | select(.tagName | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | select(.isDraft==false)] | sort_by(.publishedAt) | last | .tagName // empty')"
+          if [ -n "$prev_tag" ]; then
+            prev_sha="$(gh release view "$prev_tag" --repo "$GITHUB_REPOSITORY" --json body \
+              --jq '.body' | grep -o '<!-- source-sha: [0-9a-f]\{40\} -->' | grep -o '[0-9a-f]\{40\}' || true)"
+          fi
+          {
+            if [ -n "$prev_sha" ] && git cat-file -e "$prev_sha" 2>/dev/null; then
+              echo "**Changes since $prev_tag:**"
+              echo
+              git log --pretty=format:'- %s' "$prev_sha..$cur_sha"
+              echo
+              echo
+            else
+              echo "*(No recoverable previous-release marker — this may be the first release using"
+              echo "auto-generated notes, or the previous release predates this mechanism.)*"
+              echo
+            fi
+            echo "Built from ${{ env.SRC_REPO }}@${{ inputs.ref }} ($cur_sha)."
+            echo "<!-- source-sha: $cur_sha -->"
+          } > "$GITHUB_WORKSPACE/RELEASE_NOTES.md"
+          echo "----- RELEASE_NOTES.md -----"
+          cat "$GITHUB_WORKSPACE/RELEASE_NOTES.md"
+
       - name: Publish GitHub Release (on this repo)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
-          body: "Built from ${{ env.SRC_REPO }}@${{ inputs.ref }}."
+          body_path: RELEASE_NOTES.md
           files: |
             artifacts/**/*
             SHA256SUMS.txt
